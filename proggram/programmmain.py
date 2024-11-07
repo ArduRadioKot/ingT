@@ -5,7 +5,7 @@ import time
 from keras.models import load_model
 import os
 from PyQt5.QtWidgets import (QApplication, QWidget, QLabel, QComboBox, QVBoxLayout, 
-                             QPushButton, QFileDialog, QHBoxLayout)
+                             QPushButton, QFileDialog, QHBoxLayout, QCheckBox)
 from PyQt5.QtGui import QImage, QPixmap
 from PyQt5.QtCore import QTimer
 from scipy.signal import find_peaks, savgol_filter
@@ -58,12 +58,47 @@ def load_stylesheet(filename):
     except Exception as e:
         print(f"Ошибка при загрузке файла стилей: {e}")
         return ""
+# Определение весов
+emotion_weights = {
+    'Angry': 1.0,
+    'Disgust': 0.8,
+    'Fear': 0.9,
+    'Happy': 0.1,
+    'Sad': 0.5,
+    'Surprise': 0.3,
+    'Neutral': 0.0,
+    'Contempt': 0.4
+}
+stress_weight = 0.5
+threat_probability_weight = 1.0
+lip_weight = 0.5
+heart_rate_weight = 0.5
+high_heart_rate_threshold = 100  # Порог для высокой ЧСС
 
+def calculate_suspicion_score(emotion_label, stress_level, threat_probability, lip_label, heart_rate):
+    emotion_score = emotion_weights.get(emotion_label, 0)
+    
+    # Учитываем состояние губ
+    lip_score = 0.0
+    if lip_label == 'wet':
+        lip_score = -0.5  # Уменьшаем балл подозрительности для влажных губ
+    elif lip_label == 'dry':
+        lip_score = 0.5  # Увеличиваем балл подозрительности для сухих губ
+    
+    # Учитываем ЧСС
+    heart_rate_score = 0.0
+    if heart_rate > high_heart_rate_threshold:
+        heart_rate_score = 0.5  # Увеличиваем балл подозрительности для высокой ЧСС
+
+    suspicion_score = (emotion_score + (stress_level * stress_weight) + (threat_probability * threat_probability_weight) + 
+                       lip_score + heart_rate_score) / (1 + stress_weight + threat_probability_weight + lip_weight + heart_rate_weight)
+    
+    return suspicion_score
 class FaceEmotionApp(QWidget):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("Face Detection, Emotion Recognition, and Lip Moisture Detection")
-
+ 
         stylesheet = load_stylesheet(os.path.join(folder_path, 'style.qss'))  # Укажите путь к вашему файлу стилей
         self.setStyleSheet(stylesheet)
 
@@ -92,7 +127,14 @@ class FaceEmotionApp(QWidget):
         self.open_video_button = QPushButton("Open Video File")
         self.open_video_button.clicked.connect(self.open_video)
         self.video_layout.addWidget(self.open_video_button)
-
+        self.video_checkbox = QCheckBox("Show Video")
+        self.video_checkbox.setChecked(True)
+        self.video_checkbox.stateChanged.connect(self.toggle_video)
+        self.video_layout.addWidget(self.video_checkbox)
+        self.graph_checkbox = QCheckBox("Show Graph")
+        self.graph_checkbox.setChecked(True)
+        self.graph_checkbox.stateChanged.connect(self.toggle_graph)
+        self.layout.addWidget(self.graph_checkbox)
         # Create a Matplotlib Figure for the graph
         self.figure = plt.figure()
         self.canvas = FigureCanvas(self.figure)
@@ -109,6 +151,8 @@ class FaceEmotionApp(QWidget):
         # Create labels to display the results
         self.emotion_label = QLabel("Emotion: ")
         self.results_layout.addWidget(self.emotion_label)
+        self.suspicion_score_label = QLabel("Suspicion Score: -")
+        self.results_layout.addWidget(self.suspicion_score_label)
         self.lip_label = QLabel("Lip Moisture: ")
         self.results_layout.addWidget(self.lip_label)
         self.stress_level_label = QLabel("Stress Level: ")
@@ -147,7 +191,18 @@ class FaceEmotionApp(QWidget):
         self.signal = []  # Initialize signal for heart rate detection
         self.time_stamps = []  # Initialize timestamps for heart rate detection
         self.count = 0  # Initialize count for frames
+        self.heart_rate = 0
 
+    def toggle_video(self, state):
+        if state == 0:  # Unchecked
+            self.video_label.hide()
+        else:  # Checked
+            self.video_label.show()
+    def toggle_graph(self, state):
+        if state == 0:  # Unchecked
+            self.canvas.hide()
+        else:  # Checked
+            self.canvas.show()
     def open_video(self):
         video_path, _ = QFileDialog.getOpenFileName(self, "Open Video File", "", "Videos (*.mp4 *.avi)")
         if video_path:
@@ -220,6 +275,8 @@ class FaceEmotionApp(QWidget):
                     else:
                         stress_level = 0.2
 
+                    
+
                     lip_predictions = lip_model.predict(face_roi)
                     lip_index = np.argmax(lip_predictions)
                     lip_labels = ['dry', 'wet']
@@ -238,7 +295,8 @@ class FaceEmotionApp(QWidget):
                     self.threat_probability_label.setText(f"Threat Probability: {threat_probability:.2f}")
                     self.prediction_time_label.setText(f"Prediction Time: {prediction_time:.2f} ms")
                     self.accuracy_label.setText(f"Accuracy: {emotion_label}")  # Assuming accuracy is the same as emotion label
-
+                    suspicion_score = calculate_suspicion_score(emotion_label, stress_level, threat_probability, lip_label, self.heart_rate)
+                    self.suspicion_score_label.setText(f"Suspicion Score: {suspicion_score:.2f}")
                     # Extract cheek area
                     cheek_area = frame[y + int(h/2):y + h, x + int(w/4):x + int(3*w/4)]
 
@@ -250,17 +308,10 @@ class FaceEmotionApp(QWidget):
                     self.count += 1
 
                     # Calculate heart rate
-                    if len(self.signal) > 100:
-                        smoothed_signal = savgol_filter(self.signal, 51, 3)
-                        peaks, _ = find_peaks(smoothed_signal, height=170)
-                        peak_times = [self.time_stamps[p] for p in peaks]
-                        if len(peak_times) > 1:
-                            intervals = np.diff(peak_times)
-                            heart_rate = 60 / np.mean(intervals)
-                            self.heart_rate_label.setText(f"Heart Rate: {heart_rate:.2f} уд./мин")
-
+                    
                     cv2.rectangle(frame, (x, y), (x + w, y + h), (0, 0, 255), 2)
-                    cv2.putText(frame, f"{emotion_label} - {lip_label} - Threat: {threat_probability:.2f} - Stress: {stress_level:.2f} - Prediction Time: {prediction_time:.2f} ms", (x, y - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 2)
+                    cv2.putText(frame, f"{emotion_label} - {lip_label}  - Prediction Time: {prediction_time:.2f} ms", (x, y - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 2)
+                    
 
                 # Convert BGR to RGB
                 frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
@@ -285,7 +336,7 @@ class FaceEmotionApp(QWidget):
         ax.set_title('Фотоплетизмограмма')
 
         # Сглаживание сигнала
-        window_length = 51
+        window_length = 21  # Уменьшение длины окна
         polyorder = 3
         if len(self.signal) > window_length:
             smoothed_signal = savgol_filter(self.signal, window_length, polyorder)
@@ -293,14 +344,15 @@ class FaceEmotionApp(QWidget):
             smoothed_signal = self.signal
 
         # Поиск пиков в сигнале
-        peaks, _ = find_peaks(smoothed_signal, height=170)  # Установите порог для нахождения пиков
+        peaks, _ = find_peaks(smoothed_signal)  # Убрать height=170
         peak_times = [self.time_stamps[p] for p in peaks]  # Время пиков
 
         # Расчет ЧСС
-        if len(peak_times) > 1:
-            intervals = np.diff(peak_times)  # Интервалы между пиками
-            heart_rate = 60 / np.mean(intervals)  # Рассчитать среднюю ЧСС в ударах в минуту
-            self.heart_rate_label.setText(f'ЧСС: {heart_rate:.2f} уд./мин')  # Обновить текст QLabel
+        if len(peaks) > 0:
+            # Используем максимальное значение сигнала для расчета ЧСС
+            max_signal_value = np.max(smoothed_signal)
+            self.heart_rate = (max_signal_value / 170) * 100  # Пропорциональный расчет ЧСС
+            self.heart_rate_label.setText(f'ЧСС: {self.heart_rate:.2f} уд./мин')  # Обновить текст QLabel
 
         # Отображение графика пиков
         ax.plot(peak_times, [smoothed_signal[p] for p in peaks], "x", color='blue')  # Отметить пики на графике
